@@ -1,0 +1,238 @@
+# ==========================================================
+# Eclips | AutoBroadcast | ВСЁ В ОДНОМ ФАЙЛЕ
+# Положить в: .github/workflows/build.yml
+# Больше в репозитории ничего не нужно: workflow сам создаёт
+# pom.xml, plugin.yml, config.yml и исходник, затем компилирует.
+# Готовый .jar: Actions -> Artifacts, либо Releases -> Latest build
+# ==========================================================
+name: Build AutoBroadcast
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Generate project files
+        run: |
+          mkdir -p "$(dirname 'pom.xml')"
+          cat > 'pom.xml' << 'ECLIPS_EOF_0'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+              <modelVersion>4.0.0</modelVersion>
+
+              <groupId>ru.eclips</groupId>
+              <artifactId>AutoBroadcast</artifactId>
+              <version>1.0.0</version>
+              <packaging>jar</packaging>
+
+              <properties>
+                  <maven.compiler.source>17</maven.compiler.source>
+                  <maven.compiler.target>17</maven.compiler.target>
+                  <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+              </properties>
+
+              <repositories>
+                  <repository>
+                      <id>lanink</id>
+                      <url>https://repo.lanink.cn/repository/maven-public/</url>
+                  </repository>
+              </repositories>
+
+              <dependencies>
+                  <dependency>
+                      <groupId>cn.nukkit</groupId>
+                      <artifactId>Nukkit</artifactId>
+                      <version>MOT-SNAPSHOT</version>
+                      <scope>provided</scope>
+                  </dependency>
+              </dependencies>
+
+              <build>
+                  <finalName>AutoBroadcast</finalName>
+                  <resources>
+                      <resource>
+                          <directory>src/main/resources</directory>
+                          <filtering>true</filtering>
+                      </resource>
+                  </resources>
+              </build>
+          </project>
+          ECLIPS_EOF_0
+
+          mkdir -p "$(dirname 'src/main/resources/plugin.yml')"
+          cat > 'src/main/resources/plugin.yml' << 'ECLIPS_EOF_1'
+          name: AutoBroadcast
+          main: ru.eclips.autobroadcast.AutoBroadcast
+          version: "${project.version}"
+          api: ["1.0.0"]
+          author: Eclips
+          description: Автоматическая рассылка сообщений в чат
+
+          commands:
+            autobc:
+              description: Управление авто-рассылкой
+              usage: /autobc reload
+              permission: autobroadcast.admin
+
+          permissions:
+            autobroadcast.admin:
+              description: Доступ к /autobc
+              default: op
+          ECLIPS_EOF_1
+
+          mkdir -p "$(dirname 'src/main/resources/config.yml')"
+          cat > 'src/main/resources/config.yml' << 'ECLIPS_EOF_2'
+          # Интервал рассылки в минутах
+          interval-minutes: 10
+
+          # Префикс перед каждой строкой (поддерживает &-цвета)
+          prefix: "&6[Eclips] &r"
+
+          # Не слать сообщения, если на сервере никого нет
+          skip-if-empty: true
+
+          # Сообщения идут по кругу. \n = перенос строки.
+          messages:
+            - "&eХочешь бесплатную привилегию?\n&fСоздай видео о нашем сервере и кинь в тг &b@Mysticwinds21"
+            - "&c!!! &fСервер сейчас в стадии открытого раннего тестирования и будет ещё много доработок &c!!!"
+          ECLIPS_EOF_2
+
+          mkdir -p "$(dirname 'src/main/java/ru/eclips/autobroadcast/AutoBroadcast.java')"
+          cat > 'src/main/java/ru/eclips/autobroadcast/AutoBroadcast.java' << 'ECLIPS_EOF_3'
+          package ru.eclips.autobroadcast;
+
+          import cn.nukkit.Server;
+          import cn.nukkit.command.Command;
+          import cn.nukkit.command.CommandSender;
+          import cn.nukkit.plugin.PluginBase;
+          import cn.nukkit.scheduler.TaskHandler;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          public class AutoBroadcast extends PluginBase {
+
+              private final List<String> messages = new ArrayList<>();
+              private String prefix = "";
+              private boolean skipIfEmpty = true;
+              private int index = 0;
+              private TaskHandler task;
+
+              @Override
+              public void onEnable() {
+                  saveDefaultConfig();
+                  load();
+                  getLogger().info("AutoBroadcast включён. Сообщений: " + messages.size());
+              }
+
+              @Override
+              public void onDisable() {
+                  stopTask();
+              }
+
+              private void load() {
+                  reloadConfig();
+                  stopTask();
+
+                  prefix = color(getConfig().getString("prefix", ""));
+                  skipIfEmpty = getConfig().getBoolean("skip-if-empty", true);
+
+                  messages.clear();
+                  for (String m : getConfig().getStringList("messages")) {
+                      if (m != null && !m.isBlank()) {
+                          messages.add(m);
+                      }
+                  }
+                  index = 0;
+
+                  int minutes = Math.max(1, getConfig().getInt("interval-minutes", 10));
+                  int ticks = minutes * 60 * 20;
+
+                  if (messages.isEmpty()) {
+                      getLogger().warning("Список messages пуст, рассылка отключена.");
+                      return;
+                  }
+
+                  task = getServer().getScheduler().scheduleDelayedRepeatingTask(this, this::broadcastNext, ticks, ticks);
+              }
+
+              private void stopTask() {
+                  if (task != null) {
+                      task.cancel();
+                      task = null;
+                  }
+              }
+
+              private void broadcastNext() {
+                  Server server = getServer();
+                  if (messages.isEmpty()) return;
+                  if (skipIfEmpty && server.getOnlinePlayers().isEmpty()) return;
+
+                  String msg = messages.get(index);
+                  index = (index + 1) % messages.size();
+
+                  for (String line : msg.split("\\\\n|\n")) {
+                      server.broadcastMessage(prefix + color(line));
+                  }
+              }
+
+              private static String color(String s) {
+                  return s == null ? "" : s.replace('&', '§');
+              }
+
+              @Override
+              public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+                  if (!command.getName().equalsIgnoreCase("autobc")) return false;
+
+                  if (!sender.hasPermission("autobroadcast.admin")) {
+                      sender.sendMessage("§cУ вас нет прав.");
+                      return true;
+                  }
+
+                  if (args.length == 1 && args[0].equalsIgnoreCase("reload")) {
+                      load();
+                      sender.sendMessage("§aAutoBroadcast перезагружен. Сообщений: " + messages.size());
+                      return true;
+                  }
+
+                  sender.sendMessage("§eИспользование: /autobc reload");
+                  return true;
+              }
+          }
+          ECLIPS_EOF_3
+
+      - name: Build with Maven
+        run: mvn -B -ntp clean package -DskipTests
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoBroadcast
+          path: target/AutoBroadcast.jar
+          if-no-files-found: error
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          prerelease: true
+          files: target/AutoBroadcast.jar
